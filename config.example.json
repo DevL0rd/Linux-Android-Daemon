@@ -3,7 +3,6 @@
         "enabled": true,
         "enable_tcpip": true,
         "tcpip_port": 5555,
-        "launch_scrcpy": true,
         "scrcpy_args": ["--turn-screen-off", "--stay-awake"],
         "notify": false,
         "unlock": true,
@@ -16,5 +15,18 @@
         "mode": "clone",
         "kdeconnect_notify": false
     },
-    "devices": {}
+    "devices": {},
+    "camera": {
+        "active_serial": "",
+        "video_nr": 9,
+        "facing": "back",
+        "camera_id": "",
+        "resolution": "",
+        "fps": 0,
+        "aspect_ratio": "",
+        "zoom": 1.0,
+        "high_speed": false,
+        "torch": false,
+        "extra_args": []
+    }
 }

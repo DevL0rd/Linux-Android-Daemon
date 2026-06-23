@@ -7,12 +7,30 @@ import subprocess
 from core.config import load_config, save_config, ensure_device_in_config, CONFIG_FILE
 from core.adb_monitor import AdbMonitor
 from core.network_monitor import NetworkMonitor
+from core.phonescreen import PinnedMirror
 import kdeconnect_notify
 
-# A mirror seen running within this many seconds of a USB unplug is considered
-# "was up at unplug" and gets reconnected over WiFi. Must exceed the adb monitor
-# grace period so a session alive at unplug still counts when disconnect fires.
-MIRROR_RECONNECT_WINDOW = 12
+
+def adb_cmd(args, timeout=15, retries=2):
+    """Run an adb command, surviving an adb-server crash. adb's server
+    occasionally SIGSEGVs during USB plug/unplug churn; on failure we restart it
+    and retry, so a single crash doesn't make us mis-read state (e.g. think
+    tcpip is off and needlessly restart adbd)."""
+    last = None
+    for _ in range(retries + 1):
+        try:
+            last = subprocess.run(["adb"] + args, capture_output=True, text=True, timeout=timeout)
+            if last.returncode == 0:
+                return last
+        except subprocess.TimeoutExpired:
+            last = None
+        try:
+            subprocess.run(["adb", "start-server"], capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(0.1)   # tiny buffer for the device transport to re-attach
+    return last if last is not None else subprocess.CompletedProcess(["adb"] + args, 1, "", "")
+
 
 def send_notification(title, message, icon="smartphone", urgency="normal"):
     try:
@@ -34,10 +52,17 @@ class PhoneWatcher:
         self.adb_monitor = AdbMonitor(self.on_phone_connect, self.on_phone_disconnect)
         self.net_monitor = NetworkMonitor(self.on_network_change)
 
+        # The desktop / popup "Phone Screen" pinned mirror is owned here (single
+        # scrcpy authority) — the widget is just a thin client over request/status
+        # tmpfs files. Ticked from the main loop below.
+        self.pinned = PinnedMirror()
+
         # Mirror state
         self.scrcpy_procs = {}        # serial -> Popen we launched (best-effort)
         self.phone_ip = {}            # serial -> last known LAN IP (for WiFi fallback)
-        self.mirror_last_seen = {}    # serial -> monotonic time scrcpy was last seen up
+        self.mirror_seen = {}         # serial -> last monotonic time scrcpy was alive
+                                      # (so an unplug that races scrcpy's exit still
+                                      # follows the mirror onto WiFi)
 
         # Seed last-known IPs from config so a fresh daemon (e.g. after reboot)
         # already knows where to reach each phone over WiFi.
@@ -59,7 +84,6 @@ class PhoneWatcher:
         print(f"[Net] Real uplink present at startup: {self.wifi_online}")
         self.adb_monitor.start()
         self.net_monitor.start()
-        threading.Thread(target=self._mirror_watch, daemon=True).start()
 
         # Optional KDE Connect notification integration (click a phone
         # notification on the PC -> open scrcpy + expand the shade in the mirror)
@@ -67,9 +91,32 @@ class PhoneWatcher:
             launcher = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scrcpy_launch.py")
             kdeconnect_notify.start(launcher)
 
-        # Keep daemon alive
+        # Main loop: a fast reconcile (window move/hide — instant reactions) plus the
+        # slower lifecycle tick (scrcpy launch/keep-alive/lock, ~1s).
+        last_tick = 0.0
+        last_lock = 0.0
         while True:
-            time.sleep(1)
+            try:
+                self.pinned.reconcile()
+            except Exception as e:
+                print(f"[phonescreen] reconcile error: {e}")
+            now = time.monotonic()
+            if now - last_lock >= 0.5:        # fast physical lock/unlock detection
+                last_lock = now
+                try:
+                    self.pinned.poll_lock()
+                except Exception as e:
+                    print(f"[phonescreen] poll_lock error: {e}")
+            if now - last_tick >= 1.0:
+                last_tick = now
+                try:
+                    self.pinned.tick()
+                except Exception as e:
+                    print(f"[phonescreen] tick error: {e}")
+                for serial in list(self.plugged):
+                    if self._scrcpy_running(serial):
+                        self.mirror_seen[serial] = now
+            time.sleep(0.15)
 
     # ---- helpers ---------------------------------------------------------
 
@@ -123,6 +170,11 @@ class PhoneWatcher:
             pid, cmd = parts
             if "scrcpy_launch.py" in cmd:
                 continue  # the wrapper — leave it to restore rotation and exit
+            if "--v4l2-sink" in cmd or "--video-source=camera" in cmd:
+                continue  # the phone-camera webcam feed, NOT a screen mirror
+            if "PhoneScreenPinned" in cmd:
+                continue  # the desktop Phone Screen widget's mirror — it manages its
+                          # own USB<->WiFi switching, so the daemon must not grab it
             is_client = re.search(r"(^|/|\s)scrcpy(\s|$)", cmd)
             if is_client and any(p in cmd for p in patterns):
                 try:
@@ -150,65 +202,6 @@ class PhoneWatcher:
                 pass
         return True
 
-    def _launch_scrcpy(self, serial, target=None, name=None):
-        """Launch scrcpy for a serial over `target` (a USB serial or ip:port) via
-        scrcpy_launch.py, sharing the unlock + scrcpy_args path. Callers kill any
-        existing session first, so this always launches."""
-        target = target or serial
-        name = name or serial
-        launcher = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scrcpy_launch.py")
-        print(f"[scrcpy] Launching for {name} over {target}")
-        try:
-            self.scrcpy_procs[serial] = subprocess.Popen(["python3", launcher, target])
-            self.mirror_last_seen[serial] = time.monotonic()
-        except FileNotFoundError:
-            send_notification("scrcpy Not Found", "Install scrcpy to enable mirroring", "dialog-error", "critical")
-            print("[scrcpy] launcher/scrcpy not found.")
-
-    def _ensure_shortcut(self, serial):
-        """Create/refresh a single "Phone" desktop launcher (app menu + Desktop)
-        with StartupWMClass=scrcpy so KDE groups the window under the icon. The
-        clone-vs-extended behaviour is driven by the `mode` config setting, not
-        by separate shortcuts."""
-        launcher = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scrcpy_launch.py")
-        content = (
-            "[Desktop Entry]\n"
-            "Type=Application\n"
-            "Name=Phone\n"
-            "Comment=Mirror phone — USB if plugged in, else last known WiFi IP\n"
-            f"Exec=/usr/bin/python3 {launcher} --auto {serial}\n"
-            "Icon=smartphone\n"
-            "Terminal=false\n"
-            "StartupWMClass=scrcpy\n"
-            "Categories=Utility;RemoteAccess;\n"
-            "Keywords=phone;android;mirror;scrcpy;screen;\n"
-        )
-        for d in (os.path.expanduser("~/.local/share/applications"),
-                  os.path.expanduser("~/Desktop")):
-            if not os.path.isdir(d):
-                continue
-            # Remove the old extended-display variant shortcut if present
-            old = os.path.join(d, f"phone-{serial}-display.desktop")
-            if os.path.exists(old):
-                try:
-                    os.remove(old)
-                    print(f"[Shortcut] Removed {old}")
-                except OSError:
-                    pass
-            path = os.path.join(d, f"phone-{serial}.desktop")
-            try:
-                if not os.path.exists(path) or open(path).read() != content:
-                    with open(path, "w") as f:
-                        f.write(content)
-                    os.chmod(path, 0o755)
-                    if d.endswith("Desktop"):
-                        subprocess.run(["gio", "set", path, "metadata::trusted", "true"], capture_output=True)
-                    else:
-                        subprocess.run(["update-desktop-database", d], capture_output=True)
-                    print(f"[Shortcut] Wrote {path}")
-            except Exception as e:
-                print(f"[Shortcut] failed to write {path}: {e}")
-
     def _wait_until_ready(self, serial, timeout=20):
         """Block until the phone's USB transport is back and responsive.
 
@@ -230,15 +223,6 @@ class PhoneWatcher:
             time.sleep(0.5)
         return False
 
-    def _mirror_watch(self):
-        """Continuously record when a mirror is actually running for each known
-        phone, so on_phone_disconnect can tell whether one was up at unplug."""
-        while True:
-            for serial in set(self.phone_ip) | set(self.plugged):
-                if self._scrcpy_running(serial):
-                    self.mirror_last_seen[serial] = time.monotonic()
-            time.sleep(2)
-
     # ---- events ----------------------------------------------------------
 
     def on_phone_connect(self, serial, model):
@@ -257,7 +241,6 @@ class PhoneWatcher:
             return
 
         self.plugged.add(serial)
-        self._ensure_shortcut(serial)
         notify = cfg.get("notify", False)
         if notify:
             send_notification("Phone Connected", f"{name} plugged in over USB", "smartphone")
@@ -274,25 +257,36 @@ class PhoneWatcher:
                 self.last_config_mtime = os.path.getmtime(CONFIG_FILE)
                 print(f"[Config] Saved last_ip={ip} for {name}")
 
-        # 1. Re-enable wireless ADB on this phone (survives until it reboots)
+        # 1. Enable wireless ADB on this phone — but ONLY if it isn't already on.
+        # Re-running `adb tcpip` restarts the phone's adbd, which tears down every
+        # existing transport (including the WiFi one the camera daemon holds to
+        # this same phone) and can SIGSEGV the adb server mid-churn — which kills
+        # the scrcpy we're about to launch and breaks the next few adb calls. Ask
+        # adbd directly over USB whether it's already in tcp mode (the
+        # service.adb.tcp.port prop) and leave it alone if so.
         if cfg.get("enable_tcpip", True):
             port = str(cfg.get("tcpip_port", 5555))
-            print(f"[ADB] Enabling wireless adb on {name} (port {port})")
-            try:
-                subprocess.run(["adb", "-s", serial, "tcpip", port], timeout=15)
-            except subprocess.TimeoutExpired:
-                print("[ADB] tcpip timed out, continuing anyway")
-            if self._wait_until_ready(serial):
-                if notify:
-                    send_notification("Wireless ADB Enabled", f"{name} is now reachable on port {port}", "network-wireless")
+            cur = adb_cmd(["-s", serial, "shell", "getprop", "service.adb.tcp.port"]).stdout.strip()
+            if cur == port:
+                print(f"[ADB] {name} already in tcp mode on {port} — skipping tcpip (avoids adb-server churn)")
             else:
-                print("[ADB] device did not become ready in time after tcpip")
+                print(f"[ADB] Enabling wireless adb on {name} (port {port})")
+                try:
+                    subprocess.run(["adb", "-s", serial, "tcpip", port], timeout=15)
+                except subprocess.TimeoutExpired:
+                    print("[ADB] tcpip timed out, continuing anyway")
+                if self._wait_until_ready(serial):
+                    if notify:
+                        send_notification("Wireless ADB Enabled", f"{name} is now reachable on port {port}", "network-wireless")
+                else:
+                    print("[ADB] device did not become ready in time after tcpip")
 
-        # 2. Plugging in over USB takes over the mirror: kill any running scrcpy
-        # (e.g. a WiFi session) and reconnect over the faster USB cable.
-        if cfg.get("launch_scrcpy", True):
-            self._kill_scrcpy(serial)
-            self._launch_scrcpy(serial, target=serial, name=name)
+        # 2. We no longer auto-pop a scrcpy mirror on plug-in. The ONLY mirror is the
+        # one a widget claims (the pinned manager owns it). If the Phone Screen widget
+        # is pinning this phone, nudge its mirror onto the now-faster USB cable.
+        if self.pinned.wants(serial):
+            print(f"[scrcpy] {name} is pinned by the Phone Screen widget — nudging it onto USB")
+            subprocess.run(["pkill", "-f", "PhoneScreenPinned"], capture_output=True)
 
         # 3. If there's no real uplink, fall back to this phone's USB tethering
         self.evaluate_tethering()
@@ -307,14 +301,11 @@ class PhoneWatcher:
             self.tether_active = False
             self.tether_phone = None
 
-        # If a mirror was up at unplug, follow the phone onto WiFi.
-        mirror_was_up = (time.monotonic() - self.mirror_last_seen.get(serial, 0)) <= MIRROR_RECONNECT_WINDOW
-        ip = self.phone_ip.get(serial)
-        if mirror_was_up and cfg.get("launch_scrcpy", True) and ip:
-            target = f"{ip}:{cfg.get('tcpip_port', 5555)}"
-            self._kill_scrcpy(serial)  # the USB session is dead; clear any leftovers
-            print(f"[scrcpy] USB unplugged — reconnecting over WiFi ({target})")
-            self._launch_scrcpy(serial, target=target, name=name)
+        self.mirror_seen.pop(serial, None)
+        # Only the pinned widget mirror exists now; it follows the phone onto WiFi on
+        # its own. Anything else (a leftover) just gets cleaned up.
+        if self.pinned.wants(serial):
+            print(f"[scrcpy] {name} unplugged — pinned manager will move it to WiFi")
         else:
             self._kill_scrcpy(serial)
 
@@ -360,16 +351,11 @@ class PhoneWatcher:
         """Run an `svc usb setFunctions ...` switch. Because that re-enumerates
         the USB device and kills a USB-bound scrcpy, stop any running mirror
         first and bring it back (over USB) afterwards if it was up."""
-        was_running = self._scrcpy_running(serial)
         self._kill_scrcpy(serial)
         try:
             subprocess.run(["adb", "-s", serial] + ["shell"] + svc_cmd, timeout=15)
         except Exception as e:
             print(f"[Tether] usb function switch failed: {e}")
-        if was_running and serial in self.plugged and self._cfg_for(serial).get("launch_scrcpy", True):
-            self._wait_until_ready(serial)
-            print(f"[scrcpy] Relaunching after USB mode switch ({serial})")
-            self._launch_scrcpy(serial, target=serial, name=self._cfg_for(serial).get("name"))
 
 if __name__ == "__main__":
     watcher = PhoneWatcher()

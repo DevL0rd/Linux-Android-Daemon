@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Thin control client for the Phone Screen widgets (desktop + popup).
+
+There is ONE pinned scrcpy mirror, owned by the DAEMON (src/core/phonescreen.py).
+Widgets don't manage scrcpy — they just CLAIM the mirror (with a priority + the
+rectangle they want it in) and heartbeat that claim while they want it on screen.
+The daemon points the single mirror at the highest-priority live claim, moving its
+window without relaunching; when the last claim drops it locks + grace-kills.
+
+This CLI only writes claims, fires one-shot key events, and reads status.
+
+Usage:
+    phonescreenctl state
+    phonescreenctl claim <name> <priority> <x> <y> <w> <h> [serial] [--above 0|1] [--borderless 0|1] [--extra "args"]
+    phonescreenctl release <name>
+    phonescreenctl window [serial]                # pop out: movable window (pauses pinned)
+    phonescreenctl lock   [serial]                # lock the phone (instant hide)
+    phonescreenctl unlock [serial]                # wake + PIN-unlock (instant show)
+    phonescreenctl volume up|down [serial]
+    phonescreenctl nav back|home|recents [serial]
+    phonescreenctl rule-clear                     # remove our KWin rule (uninstall)
+"""
+import os
+import sys
+import json
+import time
+import subprocess
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "src"))
+from core import phonescreen as ps
+import scrcpy_launch as sl
+
+
+def _parse_flags(rest):
+    serial, above, borderless, extra, minimized = "", False, True, [], False
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--above" and i + 1 < len(rest):
+            above = rest[i + 1] not in ("0", "false", "off"); i += 2
+        elif a == "--borderless" and i + 1 < len(rest):
+            borderless = rest[i + 1] not in ("0", "false", "off"); i += 2
+        elif a == "--min" and i + 1 < len(rest):
+            minimized = rest[i + 1] not in ("0", "false", "off"); i += 2
+        elif a == "--extra" and i + 1 < len(rest):
+            extra = rest[i + 1].split(); i += 2
+        elif not a.startswith("-") and not serial:
+            serial = a; i += 1
+        else:
+            i += 1
+    return serial, above, borderless, extra, minimized
+
+
+def _target(serial):
+    serial = ps.resolve_serial(serial)
+    target = ps.adb_target(serial)
+    if target and ":" in target:
+        try:
+            sl.adb(None, "connect", target)
+        except Exception:
+            pass
+    return serial, target
+
+
+# --------------------------------------------------------------------------- #
+def cmd_state():
+    sys.stdout.write(json.dumps(ps.read_status() or {"visible": False, "status": "off"}))
+    return 0
+
+
+def cmd_claim(args):
+    if len(args) < 6:
+        print("usage: phonescreenctl claim <name> <priority> x y w h [serial] [flags]", file=sys.stderr)
+        return 2
+    name = args[0]
+    priority = int(args[1])
+    x, y, w, h = (int(round(float(a))) for a in args[2:6])
+    serial, above, borderless, extra, minimized = _parse_flags(args[6:])
+    serial = ps.resolve_serial(serial)
+    ps.write_claim(name, visible=True, priority=priority, serial=serial, x=x, y=y, w=w, h=h,
+                   above=above, borderless=borderless, extra=extra, min=minimized)
+    return 0
+
+
+def cmd_release(args):
+    if not args:
+        print("usage: phonescreenctl release <name>", file=sys.stderr)
+        return 2
+    ps.remove_claim(args[0])
+    return 0
+
+
+def cmd_raise():
+    """Raise the pinned mirror to the top of the stack — used by the tray popup so
+    its embedded mirror sits above the popup window. No-op if kdotool isn't set up."""
+    try:
+        subprocess.run(["kdotool", "search", "--name", ps.TITLE_TOKEN, "windowraise"],
+                       capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return 0
+
+
+def cmd_window(args):
+    serial, target = _target(args[0] if args else "")
+    ps.touch(ps.WINDOW_PATH)
+    subprocess.run(["pkill", "-f", ps.TITLE_TOKEN], capture_output=True)
+    if not serial:
+        print("no phone to open", file=sys.stderr)
+        return 1
+    ps._runtime()
+    log = open(ps.LOG_PATH, "a")
+    subprocess.Popen(["python3", ps.LAUNCHER, "--auto", serial],
+                     stdout=log, stderr=log, start_new_session=True)
+    return 0
+
+
+def cmd_lock(args):
+    serial, target = _target(args[0] if args else "")
+    if not target:
+        print("no phone to lock", file=sys.stderr)
+        return 1
+    ps.mark_lock_pending()            # daemon poll: trust this, don't fight it
+    sl.adb(target, "shell", "input", "keyevent", "223")   # KEYCODE_SLEEP -> lock FIRST
+    ps.set_locked(True)               # ...THEN hide
+    ps.set_minimized(True)            # instant minimize (daemon rule confirms)
+    return 0
+
+
+def cmd_unlock(args):
+    serial, target = _target(args[0] if args else "")
+    if not target:
+        print("no phone to unlock", file=sys.stderr)
+        return 1
+    ps.mark_lock_pending()            # daemon poll: trust this, don't fight it
+    ps.set_locked(False)              # show FIRST...
+    ps.set_minimized(False)           # instant un-minimize (daemon rule confirms)
+    cfg = sl.load_config()
+    dev = dict(cfg.get("defaults", {}))
+    dev.update(cfg.get("devices", {}).get(sl.get_serial(target), {}))
+    pin = str(dev.get("lock_pin", "") or "")
+    sl.adb(target, "shell", "input", "keyevent", "224")   # KEYCODE_WAKEUP
+    if sl.is_locked(target) and pin:
+        sl.adb(target, "shell", "input", "keyevent", "62")   # SPACE -> PIN pad
+        time.sleep(0.1)
+        sl.adb(target, "shell", "input", "text", pin)
+        sl.adb(target, "shell", "input", "keyevent", "66")   # ENTER
+    # turn the phone panel back off immediately (the wake/PIN turned it on) so you
+    # barely see it light up. This focuses the mirror window briefly; the popup's
+    # Phone tab is kept-open so that no longer closes it.
+    if ps.screen_off_configured(sl.get_serial(target)):
+        ps.screen_off_via_scrcpy()
+    return 0
+
+
+def cmd_volume(args):
+    serial, target = _target(args[1] if len(args) > 1 else "")
+    if not target:
+        print("no phone for volume", file=sys.stderr)
+        return 1
+    key = "25" if (args and args[0] == "down") else "24"
+    sl.adb(target, "shell", "input", "keyevent", key)
+    return 0
+
+
+_NAV_KEYS = {"back": "4", "home": "3", "recents": "187"}
+
+
+def cmd_nav(args):
+    key = _NAV_KEYS.get(args[0] if args else "home")
+    if key is None:
+        print("usage: phonescreenctl nav back|home|recents", file=sys.stderr)
+        return 2
+    serial, target = _target(args[1] if len(args) > 1 else "")
+    if not target:
+        print("no phone for nav", file=sys.stderr)
+        return 1
+    sl.adb(target, "shell", "input", "keyevent", key)
+    return 0
+
+
+def main(argv):
+    if not argv:
+        print(__doc__)
+        return 2
+    cmd, rest = argv[0], argv[1:]
+    table = {
+        "state": lambda: cmd_state(),
+        "claim": lambda: cmd_claim(rest),
+        "release": lambda: cmd_release(rest),
+        "raise": lambda: cmd_raise(),
+        "window": lambda: cmd_window(rest),
+        "lock": lambda: cmd_lock(rest),
+        "unlock": lambda: cmd_unlock(rest),
+        "volume": lambda: cmd_volume(rest),
+        "nav": lambda: cmd_nav(rest),
+        "rule-clear": lambda: (ps.clear_rule(), 0)[1],
+    }
+    if cmd in table:
+        return table[cmd]()
+    print("unknown command: %s" % cmd, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

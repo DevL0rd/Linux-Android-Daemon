@@ -7,7 +7,6 @@ DEFAULTS = {
     "enabled": True,
     "enable_tcpip": True,
     "tcpip_port": 5555,
-    "launch_scrcpy": True,
     "scrcpy_args": ["--turn-screen-off", "--stay-awake"],
     "notify": False,
     "unlock": True,

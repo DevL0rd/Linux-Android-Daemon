@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Control CLI for the phone-camera daemon, used by the system-tray plasmoid.
+
+Reads/writes the shared config.json camera block and pokes runtime files the
+daemon watches. Kept tiny and cwd-independent (the applet launches it from
+plasmashell): all paths are resolved from the repo, not the working directory.
+
+Usage:
+    phonecamctl state                 # print the live status JSON
+    phonecamctl set <key> <value>     # change a camera setting (typed)
+    phonecamctl select <serial|auto>  # choose which phone to use
+    phonecamctl preview on|off        # popup-open heartbeat (drives on-demand)
+    phonecamctl probe                 # ask the daemon to enumerate cameras
+    phonecamctl view [serial|auto]    # launch the scrcpy screen mirror
+"""
+import os
+import sys
+import json
+import time
+
+# realpath (not abspath) so this resolves correctly when run via the
+# ~/.local/bin/phonecamctl symlink — otherwise `core` can't be imported.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "src"))
+from core import camera as cam
+
+# Camera settings whose values are not plain strings, so `set` stores the right type.
+_FLOAT_KEYS = {"zoom"}
+_INT_KEYS = {"fps", "video_nr"}
+_BOOL_KEYS = {"high_speed", "torch"}
+_LIST_KEYS = {"extra_args"}
+
+
+def _coerce(key, value):
+    if key in _BOOL_KEYS:
+        return str(value).strip().lower() in ("1", "true", "on", "yes")
+    if key in _INT_KEYS:
+        try:
+            return int(float(value))
+        except ValueError:
+            return 0
+    if key in _FLOAT_KEYS:
+        try:
+            return float(value)
+        except ValueError:
+            return 1.0
+    if key in _LIST_KEYS:
+        return value.split() if str(value).strip() else []
+    return str(value)
+
+
+def cmd_state():
+    try:
+        with open(cam.STATUS_PATH) as f:
+            sys.stdout.write(f.read())
+    except OSError:
+        sys.stdout.write("{}")
+    return 0
+
+
+def cmd_set(args):
+    if len(args) < 2:
+        print("usage: phonecamctl set <key> <value>", file=sys.stderr)
+        return 2
+    key, value = args[0], " ".join(args[1:])
+    if key not in cam.CAMERA_DEFAULTS or key == "active_serial":
+        print("unknown setting: %s" % key, file=sys.stderr)
+        return 2
+    cfg = cam.load_config()
+    cfg.setdefault("camera", {})[key] = _coerce(key, value)
+    cam.save_config(cfg)
+    return 0
+
+
+def cmd_select(args):
+    if not args:
+        print("usage: phonecamctl select <serial|auto>", file=sys.stderr)
+        return 2
+    serial = "" if args[0] == "auto" else args[0]
+    cfg = cam.load_config()
+    cfg.setdefault("camera", {})["active_serial"] = serial
+    cam.save_config(cfg)
+    return 0
+
+
+# Per-device screen-mirror daemon settings (config.json "devices") + typing.
+_DEV_BOOL = {"enabled", "enable_tcpip", "launch_scrcpy", "notify", "unlock",
+             "tether_failover", "dex_desktop_mode"}
+_DEV_INT = {"tcpip_port"}
+_DEV_LIST = {"scrcpy_args"}
+_GLOBAL_BOOL = {"kdeconnect_notify"}   # lives in "defaults", not per-device
+
+
+def _coerce_dev(key, value):
+    if key in _DEV_BOOL or key in _GLOBAL_BOOL:
+        return str(value).strip().lower() in ("1", "true", "on", "yes")
+    if key in _DEV_INT:
+        try:
+            return int(float(value))
+        except ValueError:
+            return 0
+    if key in _DEV_LIST:
+        return value.split() if str(value).strip() else []
+    return str(value)
+
+
+def cmd_devset(args):
+    """devset <serial|auto> <key> <value> — write a per-device daemon setting
+    (or a global one in "defaults" for kdeconnect_notify)."""
+    if len(args) < 3:
+        print("usage: phonecamctl devset <serial|auto> <key> <value>", file=sys.stderr)
+        return 2
+    serial, key, value = args[0], args[1], " ".join(args[2:])
+    cfg = cam.load_config()
+    if key in _GLOBAL_BOOL:
+        cfg.setdefault("defaults", {})[key] = _coerce_dev(key, value)
+        cam.save_config(cfg)
+        return 0
+    if serial in ("auto", ""):
+        serial = cam.pick_active_serial(cam.camera_settings(cfg), cfg)
+    if not serial or serial not in cfg.get("devices", {}):
+        print("unknown device: %s" % serial, file=sys.stderr)
+        return 2
+    cfg["devices"][serial][key] = _coerce_dev(key, value)
+    cam.save_config(cfg)
+    return 0
+
+
+def _touch(path):
+    os.makedirs(cam.RUNTIME_DIR, exist_ok=True)
+    with open(path, "w") as f:
+        f.write(str(time.time()))
+
+
+def cmd_preview(args):
+    if args and args[0] == "off":
+        try:
+            os.remove(cam.PREVIEW_HEARTBEAT)
+        except OSError:
+            pass
+        return 0
+    _touch(cam.PREVIEW_HEARTBEAT)
+    return 0
+
+
+def cmd_probe():
+    _touch(cam.PROBE_REQUEST)
+    return 0
+
+
+
+def cmd_view(args):
+    """Launch the screen mirror (scrcpy) for a phone via scrcpy_launch.py, which
+    handles unlock + USB/WiFi transport. Replaces the old desktop shortcut.
+    Detached so the applet's command runner returns immediately."""
+    serial = args[0] if args and args[0] != "auto" else ""
+    if not serial:
+        cfg = cam.load_config()
+        serial = cam.camera_settings(cfg).get("active_serial", "") \
+            or cam.pick_active_serial(cam.camera_settings(cfg), cfg) \
+            or next(iter(cfg.get("devices", {})), "")
+    launcher = os.path.join(cam.REPO_DIR, "src", "scrcpy_launch.py")
+    if not serial:
+        print("no phone to view", file=sys.stderr)
+        return 1
+    import subprocess
+    os.makedirs(cam.RUNTIME_DIR, exist_ok=True)
+    log = open(os.path.join(cam.RUNTIME_DIR, "view.log"), "w")
+    log.write("launching: %s --auto %s\n" % (launcher, serial))
+    log.flush()
+    subprocess.Popen(["python3", launcher, "--auto", serial],
+                     stdout=log, stderr=log, start_new_session=True)
+    return 0
+
+
+def main(argv):
+    if not argv:
+        print(__doc__)
+        return 2
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "state":
+        return cmd_state()
+    if cmd == "set":
+        return cmd_set(rest)
+    if cmd == "select":
+        return cmd_select(rest)
+    if cmd == "devset":
+        return cmd_devset(rest)
+    if cmd == "preview":
+        return cmd_preview(rest)
+    if cmd == "probe":
+        return cmd_probe()
+    if cmd == "view":
+        return cmd_view(rest)
+    print("unknown command: %s" % cmd, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

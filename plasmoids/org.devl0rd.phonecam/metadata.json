@@ -1,0 +1,18 @@
+{
+    "KPlugin": {
+        "Id": "org.devl0rd.phonecam",
+        "Name": "Phone Manager",
+        "Description": "Mirror your Android phone and use its camera as a webcam, from the system tray",
+        "Icon": "smartphone",
+        "Authors": [
+            { "Name": "DevL0rd", "Email": "dmhzmxn@gmail.com" }
+        ],
+        "Category": "System Information",
+        "License": "MIT",
+        "Version": "1.0.0",
+        "Website": "https://github.com/DevL0rd/Linux-Android-Daemon"
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-NotificationAreaCategory": "Hardware"
+}

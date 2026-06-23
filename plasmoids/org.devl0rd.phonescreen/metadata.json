@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Id": "org.devl0rd.phonescreen",
+        "Name": "Phone Screen",
+        "Description": "Live, always-connected Android screen pinned on the desktop (interactive scrcpy)",
+        "Icon": "smartphone",
+        "Authors": [
+            { "Name": "DevL0rd", "Email": "dmhzmxn@gmail.com" }
+        ],
+        "Category": "System Information",
+        "License": "MIT",
+        "Version": "1.0.0",
+        "Website": "https://github.com/DevL0rd/Linux-Android-Daemon"
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

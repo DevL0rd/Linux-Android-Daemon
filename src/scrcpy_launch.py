@@ -36,11 +36,26 @@ def load_config():
         return {"defaults": {}, "devices": {}}
 
 def adb(target, *args, timeout=10, capture=False):
-    cmd = ["adb"]
-    if target:
-        cmd += ["-s", target]
-    cmd += list(args)
-    return subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
+    """Run an adb command, surviving an adb-server crash. adb's server
+    occasionally SIGSEGVs during USB plug/unplug churn; on a failure we restart
+    it and retry, so a single crash doesn't break the launch. Output is always
+    captured (so we can check the result); `capture` is kept for call clarity."""
+    cmd = ["adb"] + (["-s", target] if target else []) + list(args)
+    last = None
+    for _ in range(3):
+        try:
+            last = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if last.returncode == 0:
+                return last
+        except subprocess.TimeoutExpired:
+            last = None
+        # non-zero / timeout: likely a dead or restarting server — revive + retry
+        try:
+            subprocess.run(["adb", "start-server"], capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(0.1)   # tiny buffer for the device transport to re-attach
+    return last if last is not None else subprocess.CompletedProcess(cmd, 1, "", "")
 
 def get_serial(target):
     """Resolve any adb target (usb serial or ip:port) to the hardware serial.
@@ -93,25 +108,27 @@ def is_locked(target):
         return False
 
 def unlock(target, cfg):
-    """Wake the phone and, if it's on a secure lock, type the PIN to unlock."""
+    """Wake the phone and, if it's on a secure lock, type the PIN to unlock.
+
+    Note: on Samsung the FIRST unlock after a fresh USB plug re-enumerates the
+    USB gadget (restricted-while-locked -> full mode), which drops this adb
+    transport. We don't fight that here — the daemon's event monitor sees the
+    serial reconnect on the new transport and relaunches scrcpy on it."""
     pin = str(cfg.get("lock_pin", "") or "")
     if not cfg.get("unlock", False) or not pin:
         return
 
     # Wake the screen (handles screen-off / always-on-display)
     adb(target, "shell", "input", "keyevent", "224")  # KEYCODE_WAKEUP
-    time.sleep(0.5)
 
     if not is_locked(target):
         return  # already unlocked / no keyguard, don't type into a focused field
 
-    # Press SPACE to bring up the PIN entry (no swipe needed)
-    adb(target, "shell", "input", "keyevent", "62")  # KEYCODE_SPACE
-    time.sleep(0.5)
-
-    # Enter the PIN / password and submit
+    # Bring up the PIN entry, type the PIN, submit. The adb input calls are
+    # synchronous (each returns once dispatched), so no sleeps between them.
+    adb(target, "shell", "input", "keyevent", "62")   # KEYCODE_SPACE -> PIN entry
     adb(target, "shell", "input", "text", pin)
-    adb(target, "shell", "input", "keyevent", "66")  # KEYCODE_ENTER
+    adb(target, "shell", "input", "keyevent", "66")   # KEYCODE_ENTER
 
 def lock_rotation(target, orientation):
     """Lock the device's auto-rotate to portrait/landscape so apps don't rotate
@@ -123,7 +140,10 @@ def lock_rotation(target, orientation):
     try:
         adb(target, "shell", "settings", "put", "system", "accelerometer_rotation", "0")
         adb(target, "shell", "settings", "put", "system", "user_rotation", rot)
-        print(f"[rotation] locked to {orientation}")
+        # also turn OFF Samsung's "Accidental touch protection" (proximity/pocket
+        # touch-blocking) while mirroring, so injected touches aren't dropped.
+        adb(target, "shell", "settings", "put", "system", "screen_off_pocket", "0")
+        print(f"[rotation] locked to {orientation}, accidental-touch protection off")
         return True
     except Exception as e:
         print(f"[rotation] lock failed: {e}")
@@ -135,7 +155,8 @@ def restore_rotation(target):
     auto-rotate, which avoids any cross-session save/restore races."""
     try:
         adb(target, "shell", "settings", "put", "system", "accelerometer_rotation", "1")
-        print("[rotation] restored (auto-rotate on)")
+        adb(target, "shell", "settings", "put", "system", "screen_off_pocket", "1")
+        print("[rotation] restored (auto-rotate on, accidental-touch protection back on)")
     except Exception as e:
         print(f"[rotation] restore failed: {e}")
 
@@ -215,6 +236,11 @@ def main():
         # doesn't make apps rotate in the mirror. Restored when scrcpy exits.
         orientation = str(cfg.get("orientation", "portrait") or "portrait").lower()
         locked = lock_rotation(target, orientation)
+
+    # adb's server can crash during plug/unplug churn; make sure it and the
+    # device are actually live right before handing off to scrcpy (this call
+    # restarts the server and retries on failure).
+    adb(target, "get-state", timeout=10)
 
     scrcpy_cmd = ["scrcpy", "-s", target] + list(extra) + scrcpy_args
     print(f"[scrcpy] exec: {' '.join(scrcpy_cmd)}")
