@@ -127,10 +127,16 @@ systemctl --user enable --now linux-phonecam.service >/dev/null 2>&1 \
     || echo "  ! could not enable linux-phonecam.service — enable it manually"
 
 # 6. install the plasmoids (tray Phone Camera + desktop Phone Screen)
+if [ ! -e "$REPO_DIR/shared/common/FileWatcher.qml" ]; then
+    echo "  ! shared/common (Linux-Plasma-Shared submodule) is empty." >&2
+    echo "    Run: git submodule update --init --recursive" >&2
+    exit 1
+fi
 if command -v kpackagetool6 >/dev/null 2>&1; then
     echo "Installing the Plasma widgets..."
     for d in "$REPO_DIR"/plasmoids/org.devl0rd.phonecam "$REPO_DIR"/plasmoids/org.devl0rd.phonescreen; do
         id=$(basename "$d")
+        cp "$REPO_DIR/shared/common/FileWatcher.qml" "$d/contents/ui/"  # shared (submodule) component
         if kpackagetool6 -t Plasma/Applet -u "$d" >/dev/null 2>&1; then
             echo "  upgraded $id"
         else

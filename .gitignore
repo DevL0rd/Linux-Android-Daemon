@@ -34,3 +34,6 @@ ENV/
 # Local config holds secrets (lock PIN) and per-machine device list.
 # Generated from config.example.json by install.sh on first run.
 config.json
+
+# Shared QML component synced from the shared/common submodule by install.sh
+plasmoids/*/contents/ui/FileWatcher.qml

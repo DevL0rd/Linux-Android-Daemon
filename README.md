@@ -39,7 +39,12 @@ daemon's status snapshots) and makes the daemon inherit the graphical session en
 
 ## Installation
 
+Clone **with submodules** — the shared QML components live in the
+[Linux-Plasma-Shared](https://github.com/DevL0rd/Linux-Plasma-Shared) submodule:
+
 ```bash
+git clone --recurse-submodules https://github.com/DevL0rd/Linux-Android-Daemon.git
+# already cloned without it?  git submodule update --init --recursive
 ./install.sh
 ```
 
