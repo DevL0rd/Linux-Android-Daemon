@@ -286,7 +286,7 @@ class PhoneWatcher:
         # is pinning this phone, nudge its mirror onto the now-faster USB cable.
         if self.pinned.wants(serial):
             print(f"[scrcpy] {name} is pinned by the Phone Screen widget — nudging it onto USB")
-            subprocess.run(["pkill", "-f", "PhoneScreenPinned"], capture_output=True)
+            self.pinned.switch_transport()
 
         # 3. If there's no real uplink, fall back to this phone's USB tethering
         self.evaluate_tethering()
@@ -305,7 +305,8 @@ class PhoneWatcher:
         # Only the pinned widget mirror exists now; it follows the phone onto WiFi on
         # its own. Anything else (a leftover) just gets cleaned up.
         if self.pinned.wants(serial):
-            print(f"[scrcpy] {name} unplugged — pinned manager will move it to WiFi")
+            print(f"[scrcpy] {name} unplugged — nudging the pinned mirror onto WiFi")
+            self.pinned.switch_transport()
         else:
             self._kill_scrcpy(serial)
 

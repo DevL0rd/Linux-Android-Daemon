@@ -15,8 +15,6 @@ import org.kde.plasma.plasma5support as P5Support
 Item {
     id: root
 
-    property int interval: 1500
-
     property bool ready: false
     property var devices: []
     property string activeSerial: ""
@@ -91,12 +89,10 @@ Item {
         })
     }
 
-    Timer {
-        interval: root.interval
-        repeat: true
-        running: root.dir !== ""
-        onTriggered: root.read()
-    }
+    // Event-driven via FileWatcher (no polling): re-read whenever the daemon rewrites
+    // either snapshot it depends on.
+    FileWatcher { path: root.dir ? root.dir + "/phonecam.json" : ""; onChanged: root.read() }
+    FileWatcher { path: root.dir ? root.dir + "/phonescreen.json" : ""; onChanged: root.read() }
 
     Component.onCompleted: pathHelper.connectSource("printf %s \"$XDG_RUNTIME_DIR/Linux-Android-Daemon\"")
 }

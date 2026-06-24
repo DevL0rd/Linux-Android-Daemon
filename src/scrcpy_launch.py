@@ -20,6 +20,8 @@ import os
 import sys
 import json
 import time
+import shutil
+import signal
 import subprocess
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -165,7 +167,11 @@ def main():
     # --display is a launcher-level flag (not a scrcpy flag): mirror onto a NEW
     # virtual display (extended-display / DeX-style) instead of cloning the screen.
     display_mode = "--display" in args
-    args = [a for a in args if a != "--display"]
+    # --no-unlock: just connect, DON'T wake/PIN-unlock the phone. The daemon passes
+    # this for the pinned mirror so a hidden (re)connect on plug/unplug never unlocks;
+    # the widgets unlock explicitly only when they actually show the phone.
+    no_unlock = "--no-unlock" in args
+    args = [a for a in args if a not in ("--display", "--no-unlock")]
     if not args:
         print("usage: scrcpy_launch.py <adb-target>|--auto [serial] [--display] [extra scrcpy args...]")
         return 1
@@ -209,10 +215,11 @@ def main():
     if str(cfg.get("mode", "clone")).lower() in ("extended", "display", "dex"):
         display_mode = True
 
-    try:
-        unlock(target, cfg)
-    except Exception as e:
-        print(f"[unlock] failed: {e}")
+    if not no_unlock:
+        try:
+            unlock(target, cfg)
+        except Exception as e:
+            print(f"[unlock] failed: {e}")
 
     # scrcpy_args from defaults are the baseline applied to every phone; a
     # device's own scrcpy_args are appended on top (not a replacement).
@@ -243,17 +250,34 @@ def main():
     adb(target, "get-state", timeout=10)
 
     scrcpy_cmd = ["scrcpy", "-s", target] + list(extra) + scrcpy_args
-    print(f"[scrcpy] exec: {' '.join(scrcpy_cmd)}")
+    # Line-buffer scrcpy's stdout so the daemon (which reads this stream live to detect
+    # rotation/fold resizes) gets each "Texture:" line the instant it prints, not in a
+    # block-buffered chunk. stderr is already unbuffered.
+    if shutil.which("stdbuf"):
+        scrcpy_cmd = ["stdbuf", "-oL"] + scrcpy_cmd
+    print(f"[scrcpy] exec: {' '.join(scrcpy_cmd)}", flush=True)
 
     if not locked:
-        os.execvp("scrcpy", scrcpy_cmd)  # nothing to restore → replace process
-    else:
-        # Wait for scrcpy so we can restore the rotation setting afterwards.
+        os.execvp(scrcpy_cmd[0], scrcpy_cmd)  # nothing to restore → BECOME scrcpy
+
+    # Rotation is locked, so we must outlive scrcpy to restore it afterwards — which makes
+    # scrcpy our CHILD instead of us. The daemon owns US (self.proc) and terminates us to
+    # stop/switch the mirror; forward that SIGTERM to scrcpy so it dies WITH us instead of
+    # leaking as an orphan mirror, then restore rotation on the way out.
+    proc = subprocess.Popen(scrcpy_cmd)
+
+    def _forward_term(_sig, _frame):
         try:
-            subprocess.run(scrcpy_cmd)
-        finally:
-            restore_rotation(target)
-        return 0
+            proc.terminate()
+        except OSError:
+            pass
+    signal.signal(signal.SIGTERM, _forward_term)
+
+    try:
+        proc.wait()
+    finally:
+        restore_rotation(target)
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

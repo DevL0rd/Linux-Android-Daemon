@@ -13,8 +13,6 @@ import org.kde.plasma.plasma5support as P5Support
 Item {
     id: root
 
-    property int interval: 1000
-
     property bool ready: false
     property bool loopback: false
     property bool streaming: false
@@ -41,8 +39,8 @@ Item {
         engine: "executable"
         onNewData: function(source, d) {
             root.cachePath = (d.stdout || "").trim()
-            root.read()
             disconnectSource(source)
+            root.read()
         }
     }
 
@@ -84,12 +82,7 @@ Item {
         xhr.send()
     }
 
-    Timer {
-        interval: root.interval
-        repeat: true
-        running: root.cachePath !== ""
-        onTriggered: root.read()
-    }
+    FileWatcher { path: root.cachePath; onChanged: root.read() }
 
     Component.onCompleted: helper.connectSource("printf %s \"$XDG_RUNTIME_DIR/Linux-Android-Daemon/phonecam.json\"")
 }

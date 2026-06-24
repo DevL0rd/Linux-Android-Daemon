@@ -24,6 +24,7 @@ import glob
 import json
 import time
 import shutil
+import threading
 import subprocess
 
 from core import camera as cam
@@ -41,6 +42,13 @@ LAUNCHER = os.path.join(cam.REPO_DIR, "src", "scrcpy_launch.py")
 
 CLAIM_TTL = 5.0        # a claim is "live" only if heartbeated within this window
 WINDOW_GRACE = 20.0
+
+# scrcpy logs its source capture size as "INFO: Texture: WxH" — that is the true
+# mirrored resolution (and aspect), and it is re-logged when the phone rotates/unfolds.
+_TEXTURE_RE = re.compile(r"Texture:\s*(\d+)\s*x\s*(\d+)")
+
+# the status file is written from the tick loop AND the scrcpy output reader thread
+_status_lock = threading.Lock()
 
 
 def _runtime():
@@ -96,13 +104,14 @@ def pick_winner(claims):
 
 def write_status(**kw):
     _runtime()
-    try:
-        tmp = STATUS_PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(kw, f)
-        os.replace(tmp, STATUS_PATH)
-    except OSError:
-        pass
+    with _status_lock:
+        try:
+            tmp = STATUS_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(kw, f)
+            os.replace(tmp, STATUS_PATH)
+        except OSError:
+            pass
 
 
 def read_status():
@@ -312,10 +321,6 @@ def _is_camera(cmd):
     return "--v4l2-sink" in cmd or "--video-source=camera" in cmd
 
 
-def pinned_alive():
-    return any(TITLE_TOKEN in _cmdline(p) for p in _scrcpy_pids())
-
-
 def external_mirror():
     for p in _scrcpy_pids():
         c = _cmdline(p)
@@ -338,7 +343,8 @@ def fullscreen_active():
     try:
         out = subprocess.run(["xprop", "-root", "_NET_ACTIVE_WINDOW"],
                              capture_output=True, text=True, timeout=4).stdout
-        wid = out.strip().split()[-1]
+        toks = out.strip().split()
+        wid = toks[-1] if toks else ""
         if wid.startswith("0x") and int(wid, 16) != 0:
             st = subprocess.run(["xprop", "-id", wid, "_NET_WM_STATE"],
                                capture_output=True, text=True, timeout=4).stdout
@@ -497,12 +503,12 @@ class PinnedMirror:
         self.started = 0.0
         self.connected = False
         self.next_launch = 0.0
-        self.was_alive = False
         self.applied = None          # last (x,y,w,h,above,borderless,min) pushed to KWin
         self.no_claim_since = 0.0
-        self.size_serial = ""        # phone we cached a display size for
-        self.size_wh = (9, 19)       # phone display w,h (so the widget can fill to it)
-        self.next_size = 0.0
+        self.size_wh = (9, 19)       # mirrored display w,h, read live from scrcpy's output
+                                     # ("Texture: WxH"); the popup sizes its area to this
+        self._last_status = {"visible": False, "status": "off", "running": False,
+                             "locked": False, "owner": ""}  # for off-tick size republish
         self.persist = False         # once True we keep scrcpy ALIVE (minimized when
                                      # there's no claim) — never killed, so re-opening
                                      # is instant and it can follow USB<->WiFi hidden
@@ -510,6 +516,30 @@ class PinnedMirror:
         self.borderless = True       # remembered launch flags for hidden relaunches
         self.extra = []
         self.link = ""               # ACTUAL current connection: "usb" | "wifi" | ""
+        # We OWN the mirror (self.proc) and read its output stream, so we can't adopt an
+        # orphan from a prior daemon (no pipe to it). Clear any such orphan at startup so
+        # self.proc is the single source of truth — no pgrep needed to track our own child.
+        subprocess.run(["pkill", "-f", TITLE_TOKEN], capture_output=True)
+
+    def _alive(self):
+        """Is OUR scrcpy mirror running? We launched it, so just ask the handle —
+        no process scan. self.proc is scrcpy directly (the launcher exec's into it)."""
+        return self.proc is not None and self.proc.poll() is None
+
+    def switch_transport(self):
+        """Called from the daemon's USB plug/unplug thread: drop the mirror NOW so the
+        next tick relaunches it on whatever transport is now best (USB appeared, or USB
+        vanished -> WiFi). Instant in BOTH directions — without this, an unplug just waits
+        for scrcpy to notice the dead USB link and exit on its own (several seconds). We
+        own the process, so we terminate the handle (no pkill); tick sees it dead and
+        relaunches. Reading proc into a local + an atomic float write keep it thread-safe."""
+        p = self.proc
+        if p:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+        self.next_launch = 0.0   # don't let the relaunch throttle delay the swap
 
     def wants(self, serial):
         win = pick_winner(read_claims())
@@ -546,48 +576,73 @@ class PinnedMirror:
 
     # ---- slow: scrcpy lifecycle -----------------------------------------
     def _stop(self):
-        if self.proc and self.proc.poll() is None:
+        # We own it — terminate the handle; no pkill/pgrep dance.
+        if self.proc:
             try:
                 self.proc.terminate()
             except OSError:
                 pass
-        self.proc = None
-        if pinned_alive():
-            subprocess.run(["pkill", "-f", TITLE_TOKEN], capture_output=True)
+            self.proc = None
         self.connected = False
-        self.was_alive = False
         self.applied = None
 
     def _launch(self, serial, borderless, extra):
-        flags = ["--window-title", TITLE_TOKEN, "--no-audio", "--no-window-aspect-ratio-lock"]
+        # --no-unlock: the pinned mirror just CONNECTS; it never wakes/PIN-unlocks the
+        # phone (so a hidden reconnect on plug/unplug stays locked). The widgets unlock
+        # explicitly only when they actually show the phone.
+        flags = ["--no-unlock", "--window-title", TITLE_TOKEN, "--no-audio",
+                 "--no-window-aspect-ratio-lock"]
         if borderless:
             flags.append("--window-borderless")
         flags += extra
         try:
             _runtime()
-            log = open(LOG_PATH, "a")
-            return subprocess.Popen(["python3", LAUNCHER, "--auto", serial] + flags,
-                                    stdout=log, stderr=log)
+            # -u + a piped stream: we read scrcpy's output LIVE (see _read_output) instead
+            # of polling its log on disk, so a size change reaches us the instant it prints.
+            proc = subprocess.Popen(["python3", "-u", LAUNCHER, "--auto", serial] + flags,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1)
         except OSError as e:
             print("[phonescreen] launch failed: %s" % e)
             return None
+        threading.Thread(target=self._read_output, args=(proc,), daemon=True).start()
+        return proc
 
-    def _refresh_size(self, serial):
-        now = time.time()
-        if serial == self.size_serial and now < self.next_size:
-            return
-        self.next_size = now + 15.0
+    def _read_output(self, proc):
+        # Own scrcpy's output stream: tee it to the log for debugging AND fire an immediate
+        # resize the moment scrcpy reports a new texture (rotation / unfolding the foldable).
+        # The texture is the SOURCE capture size — the true aspect, independent of the window
+        # size we force — so the popup can size its area to it and the mirror fills it exactly.
         try:
-            out = sl.adb(adb_target(serial), "shell", "wm", "size", capture=True).stdout or ""
-            m = re.search(r"(\d+)\s*x\s*(\d+)", out.strip().splitlines()[-1])
-            if m:
-                self.size_serial = serial
-                self.size_wh = (int(m.group(1)), int(m.group(2)))
+            with open(LOG_PATH, "a") as log:
+                for line in proc.stdout:
+                    log.write(line)
+                    log.flush()
+                    m = _TEXTURE_RE.search(line)
+                    if not m or proc is not self.proc:
+                        continue
+                    wh = (int(m.group(1)), int(m.group(2)))
+                    if wh != self.size_wh and wh[0] > 0 and wh[1] > 0:
+                        self.size_wh = wh
+                        # On rotation scrcpy resizes its OWN window to the new orientation;
+                        # force the next reconcile to re-assert the KWin geometry rule so it
+                        # snaps back into the claim rect (the desktop widget's claim doesn't
+                        # change, so reconcile would otherwise dedupe and never re-pin it).
+                        self.applied = None
+                        self._publish_size()
         except Exception:
             pass
 
+    def _publish_size(self):
+        # Re-emit the current status carrying the new size the instant scrcpy reports it,
+        # so the widgets reshape immediately instead of waiting for the next tick.
+        w, h = self.size_wh
+        write_status(width=w, height=h, link=self.link, **self._last_status)
+
     def _status(self, **kw):
-        write_status(width=self.size_wh[0], height=self.size_wh[1], link=self.link, **kw)
+        self._last_status = kw
+        w, h = self.size_wh
+        write_status(width=w, height=h, link=self.link, **kw)
 
     def poll_lock(self):
         """Fast physical lock/unlock detection so a SHOWN mirror hides/shows quickly.
@@ -596,7 +651,7 @@ class PinnedMirror:
         if lock_pending():                       # a just-pressed button owns the state
             return
         win = pick_winner(read_claims())
-        if not win or bool(win.get("min", False)) or not pinned_alive():
+        if not win or bool(win.get("min", False)) or not self._alive():
             return
         set_locked(is_locked(self.target or adb_target(self.serial)))
 
@@ -631,7 +686,7 @@ class PinnedMirror:
             # in force) so it never flashes; if it's frozen on a dead link, drop it so
             # the next reachable tick can bring it back.
             if serial and reachable(serial):
-                if not pinned_alive() and not external_mirror():
+                if not self._alive() and not external_mirror():
                     now = time.time()
                     if now >= self.next_launch:
                         self.next_launch = now + 2.0
@@ -640,9 +695,9 @@ class PinnedMirror:
                         self.proc = self._launch(serial, self.borderless, self.extra)
                         self.started = now
                         self.applied = None
-            elif pinned_alive():
+            elif self._alive():
                 self._stop()                          # frozen on a dead link -> drop it
-            self._status(visible=False, status="minimized", running=pinned_alive(),
+            self._status(visible=False, status="minimized", running=self._alive(),
                          locked=get_locked(), owner="", serial=serial)
             return
         self.no_claim_since = 0.0
@@ -668,9 +723,7 @@ class PinnedMirror:
             self._status(visible=True, status="offline", running=False, locked=False, serial=serial, owner=owner)
             return
 
-        self._refresh_size(serial)
-
-        if not pinned_alive():
+        if not self._alive():
             now = time.time()
             if now < self.next_launch:
                 self._status(visible=True, status="connecting", running=False, locked=get_locked(), serial=serial, owner=owner)
@@ -681,17 +734,11 @@ class PinnedMirror:
             self.proc = self._launch(serial, borderless, extra)
             self.started = now
             self.connected = False
-            self.was_alive = True
             self.persist = True          # from now on, keep it alive (never grace-kill)
             self.applied = None          # force reconcile to position the new window
             self._status(visible=True, status="connecting", running=False, locked=get_locked(), serial=serial, owner=owner)
             return
 
-        if not self.was_alive:           # adopted a running mirror (daemon restart)
-            self.was_alive = True
-            self.persist = True
-            self.started = time.time()
-            self.target = adb_target(serial)
         if not self.connected and time.time() - self.started > 3.0:
             self.connected = True
 

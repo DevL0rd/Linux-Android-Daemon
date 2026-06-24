@@ -70,7 +70,6 @@ PlasmoidItem {
 
     PhoneCamData {
         id: feed
-        interval: root.previewPaused ? 300 : Plasmoid.configuration.pollInterval
         onUpdated: {
             // resume the preview the moment the daemon's re-pin lands
             if (root.previewPaused && feed.pinGen !== root.pausedPinGen) {
@@ -174,7 +173,7 @@ PlasmoidItem {
     property var pendingLock: null
     readonly property bool displayLocked: pendingLock !== null ? pendingLock : mirror.locked
 
-    MirrorData { id: mirror; interval: 800 }
+    MirrorData { id: mirror }
 
     P5Support.DataSource {
         id: psRunner; engine: "executable"
@@ -470,6 +469,10 @@ PlasmoidItem {
                             color: Qt.alpha(Kirigami.Theme.textColor, 0.04)
                             border.width: 1; border.color: Qt.alpha(Kirigami.Theme.textColor, 0.06)
                             Component.onCompleted: { root._phoneTarget = phoneArea; root.claimMirror() }
+                            // reshape on rotation/fold pins the mirror to the new size
+                            // the instant the area resizes (not on the next heartbeat)
+                            onWidthChanged: if (!root.resizing) root.claimMirror()
+                            onHeightChanged: if (!root.resizing) root.claimMirror()
 
                             MouseArea {
                                 anchors.fill: parent

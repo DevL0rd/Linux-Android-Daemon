@@ -53,7 +53,7 @@ PlasmoidItem {
     Plasmoid.icon: "smartphone"
     preferredRepresentation: fullRepresentation
 
-    ScreenData { id: feed; interval: Plasmoid.configuration.pollInterval }
+    ScreenData { id: feed }
 
     P5Support.DataSource {
         id: runner
@@ -211,6 +211,9 @@ PlasmoidItem {
                 border.color: Qt.alpha(Kirigami.Theme.textColor, 0.06)
 
                 Component.onCompleted: { root._pinTarget = screenArea; root.claimMirror() }
+                // re-pin instantly when the widget is resized, not on the next heartbeat
+                onWidthChanged: root.claimMirror()
+                onHeightChanged: root.claimMirror()
 
                 // while locked the mirror is hidden and this panel shows — double
                 // click it to unlock (only active then, so it never eats normal clicks)
