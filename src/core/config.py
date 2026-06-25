@@ -7,7 +7,9 @@ DEFAULTS = {
     "enabled": True,
     "enable_tcpip": True,
     "tcpip_port": 5555,
-    "scrcpy_args": ["--turn-screen-off", "--stay-awake"],
+    "scrcpy_args": [],
+    "stay_awake": False,     # opt-in: keep the phone awake while plugged into USB
+    "screen_off": True,      # blank the phone's physical screen while viewing the mirror
     "notify": False,
     "unlock": True,
     "lock_pin": "",

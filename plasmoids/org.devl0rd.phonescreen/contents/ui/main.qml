@@ -181,7 +181,7 @@ PlasmoidItem {
                     display: QQC2.AbstractButton.IconOnly
                     enabled: feed.ready && feed.reachable && feed.status !== "external"
                     onClicked: root.popOut()
-                    QQC2.ToolTip.text: i18n("Open as a movable window")
+                    QQC2.ToolTip.text: i18n("Pop out")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: 600
                 }
@@ -192,8 +192,7 @@ PlasmoidItem {
                     checkable: true
                     checked: root.forceHide
                     onToggled: Plasmoid.configuration.hide = checked
-                    QQC2.ToolTip.text: root.forceHide ? i18n("Show the mirror")
-                                                      : i18n("Hide the mirror (keeps it running, for privacy)")
+                    QQC2.ToolTip.text: root.forceHide ? i18n("Show") : i18n("Hide")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: 600
                 }
@@ -254,14 +253,14 @@ PlasmoidItem {
                         Layout.maximumWidth: screenArea.width - Kirigami.Units.largeSpacing * 2
                         horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
                         color: Kirigami.Theme.textColor; opacity: 0.8; font: Kirigami.Theme.smallFont
-                        text: !feed.ready ? i18n("Daemon not running")
-                            : !root.mirrorMine ? i18n("In use in the dropdown menu")
-                            : root.forceHide ? i18n("Hidden — still running, click the eye to show")
-                            : feed.status === "external" ? i18n("In use in a separate window — widget paused")
-                            : feed.status === "fullscreen" ? i18n("Paused — a fullscreen app is in focus")
-                            : feed.status === "offline" ? i18n("Phone not connected\nPlug in USB or connect over Wi-Fi")
-                            : root.displayLocked ? i18n("Phone is locked\nDouble-click to unlock")
-                            : feed.status === "connected" ? i18n("Live mirror pinned here")
+                        text: !feed.ready ? i18n("No daemon")
+                            : !root.mirrorMine ? i18n("In dropdown")
+                            : root.forceHide ? i18n("Hidden")
+                            : feed.status === "external" ? i18n("In another window")
+                            : feed.status === "fullscreen" ? i18n("Fullscreen")
+                            : feed.status === "offline" ? i18n("Offline")
+                            : root.displayLocked ? i18n("Locked")
+                            : feed.status === "connected" ? i18n("Live")
                             : i18n("Connecting…")
                     }
                 }

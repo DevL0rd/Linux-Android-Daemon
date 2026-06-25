@@ -291,11 +291,14 @@ def lock_phone(target):
         pass
 
 
-def screen_off_configured(serial):
+def screen_off_enabled(serial):
+    """Should we blank the phone's physical screen (scrcpy MOD+O) while viewing the
+    mirror? Per-device 'screen_off' setting, default on."""
     cfg = cam.load_config()
-    s = list(cfg.get("defaults", {}).get("scrcpy_args", [])) \
-        + list(cfg.get("devices", {}).get(serial, {}).get("scrcpy_args", []))
-    return "--turn-screen-off" in s or "-S" in s
+    dev = cfg.get("devices", {}).get(serial, {})
+    if "screen_off" in dev:
+        return bool(dev["screen_off"])
+    return bool(cfg.get("defaults", {}).get("screen_off", True))
 
 
 # --------------------------------------------------------------------------- #
@@ -470,8 +473,8 @@ def screen_off_via_scrcpy():
         subprocess.run(["kdotool", "search", "--name", TITLE_TOKEN, "windowactivate"],
                        capture_output=True, timeout=6)
         time.sleep(0.25)
-        subprocess.run(["ydotool", "key", "56:1", "24:1", "24:0", "56:0"],
-                       capture_output=True, timeout=6)   # Left-Alt + O
+        subprocess.run(["ydotool", "key", "125:1", "24:1", "24:0", "125:0"],
+                       capture_output=True, timeout=6)   # Meta(Super) + O
         return True
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -571,8 +574,19 @@ class PinnedMirror:
             want_min = bool(win.get("min", False)) or get_locked()
         desired = (x, y, w, h, above, borderless, want_min)
         if desired != self.applied:
+            prev_min = self.applied[6] if self.applied else True
             self.applied = desired
             apply_window(x, y, w, h, above=above, borderless=borderless, minimized=want_min)
+            # mirror just became visible (un-minimized) -> blank the phone's physical
+            # screen via scrcpy's MOD+O, when enabled (default on)
+            if prev_min and not want_min and screen_off_enabled(self.serial):
+                threading.Thread(target=self._screen_off_soon, daemon=True).start()
+
+    def _screen_off_soon(self):
+        # let KWin un-minimize + map the window before we focus it, then blank the panel
+        time.sleep(0.4)
+        if self._alive():
+            screen_off_via_scrcpy()
 
     # ---- slow: scrcpy lifecycle -----------------------------------------
     def _stop(self):

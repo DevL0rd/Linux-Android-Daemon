@@ -84,7 +84,7 @@ def cmd_select(args):
 
 # Per-device screen-mirror daemon settings (config.json "devices") + typing.
 _DEV_BOOL = {"enabled", "enable_tcpip", "launch_scrcpy", "notify", "unlock",
-             "tether_failover", "dex_desktop_mode"}
+             "tether_failover", "dex_desktop_mode", "stay_awake", "screen_off"}
 _DEV_INT = {"tcpip_port"}
 _DEV_LIST = {"scrcpy_args"}
 _GLOBAL_BOOL = {"kdeconnect_notify"}   # lives in "defaults", not per-device

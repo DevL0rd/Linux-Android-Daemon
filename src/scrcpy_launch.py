@@ -10,7 +10,7 @@ config entry (and PIN) is found.
 Usage:
     scrcpy_launch.py <adb-target> [extra scrcpy args...]
     e.g. scrcpy_launch.py RFCY8112TKV
-         scrcpy_launch.py 192.168.50.3:5555 --turn-screen-off
+         scrcpy_launch.py 192.168.50.3:5555 --max-size 1024
 
     scrcpy_launch.py --auto [serial] [extra scrcpy args...]
         Pick the transport automatically: use USB if the phone is plugged in,
@@ -227,6 +227,9 @@ def main():
     for a in dev.get("scrcpy_args", []):
         if a not in scrcpy_args:
             scrcpy_args.append(a)
+    # opt-in: keep the phone awake while it's plugged into USB (default off)
+    if cfg.get("stay_awake") and "--stay-awake" not in scrcpy_args:
+        scrcpy_args.append("--stay-awake")
 
     locked = False
     if display_mode:

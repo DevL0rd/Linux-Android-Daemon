@@ -406,8 +406,7 @@ PlasmoidItem {
                     checked: root.pinned
                     icon.name: root.pinned ? "window-pin" : "window-unpin"
                     onToggled: root.pinned = checked
-                    QQC2.ToolTip.text: root.pinned ? i18n("Pinned — stays open (auto-close off)")
-                                                   : i18n("Auto-closes when it loses focus — click to pin open")
+                    QQC2.ToolTip.text: root.pinned ? i18n("Pinned") : i18n("Pin open")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: 600
                 }
@@ -470,7 +469,7 @@ PlasmoidItem {
                                 icon.name: "window-new"; display: QQC2.AbstractButton.IconOnly
                                 enabled: root.reachable && mirror.status !== "external"
                                 onClicked: root.ps("window" + (root.phoneSerial() ? " " + root.phoneSerial() : ""))
-                                QQC2.ToolTip.text: i18n("Open as a movable window")
+                                QQC2.ToolTip.text: i18n("Pop out")
                                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.delay: 600
                             }
                         }
@@ -522,13 +521,13 @@ PlasmoidItem {
                                     horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
                                     color: Kirigami.Theme.textColor; opacity: 0.8; font: Kirigami.Theme.smallFont
                                     text: root.resizing ? i18n("Resizing…")
-                                        : !feed.ready ? i18n("Daemon not running")
-                                        : mirror.status === "external" ? i18n("In use in a separate window")
-                                        : mirror.status === "fullscreen" ? i18n("Paused — a fullscreen app is in focus")
-                                        : root.displayLocked ? i18n("Phone is locked\nDouble-click to unlock")
+                                        : !feed.ready ? i18n("No daemon")
+                                        : mirror.status === "external" ? i18n("In another window")
+                                        : mirror.status === "fullscreen" ? i18n("Fullscreen")
+                                        : root.displayLocked ? i18n("Locked")
                                         : mirror.status === "connected" ? i18n("Live")
                                         : mirror.status === "connecting" ? i18n("Connecting…")
-                                        : !root.reachable ? i18n("Phone not connected — waiting…")
+                                        : !root.reachable ? i18n("Offline")
                                         : i18n("Connecting…")
                                 }
                             }
@@ -835,6 +834,16 @@ PlasmoidItem {
                 Kirigami.FormData.label: i18n("Auto-unlock:")
                 Component.onCompleted: checked = root.devVal("unlock", true) === true
                 onToggled: root.devSet("unlock", checked ? "on" : "off")
+            }
+            QQC2.Switch {
+                Kirigami.FormData.label: i18n("Blank phone screen:")
+                Component.onCompleted: checked = root.devVal("screen_off", true) === true
+                onToggled: root.devSet("screen_off", checked ? "on" : "off")
+            }
+            QQC2.Switch {
+                Kirigami.FormData.label: i18n("Keep awake on USB:")
+                Component.onCompleted: checked = root.devVal("stay_awake", false) === true
+                onToggled: root.devSet("stay_awake", checked ? "on" : "off")
             }
             QQC2.TextField {
                 Kirigami.FormData.label: i18n("Lock PIN:")
