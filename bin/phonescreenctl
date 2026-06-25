@@ -134,6 +134,7 @@ def cmd_unlock(args):
         return 1
     ps.mark_lock_pending()            # daemon poll: trust this, don't fight it
     ps.set_locked(False)              # show FIRST...
+    ps.request_blank()                # WE unlocked -> blank the panel once it shows
     ps.set_minimized(False)           # instant un-minimize (daemon rule confirms)
     cfg = sl.load_config()
     dev = dict(cfg.get("defaults", {}))

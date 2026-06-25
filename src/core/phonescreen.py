@@ -180,6 +180,27 @@ def lock_pending():
     return _fresh(LOCK_PENDING_PATH, LOCK_PENDING_TTL)
 
 
+# A widget-initiated unlock requests a one-shot screen-off once the mirror shows, so we
+# blank the panel ONLY when WE unlocked — a manual hand-unlock (seen only by the lock
+# poll) must not blank it. Consumed on the next un-minimize; TTL'd so a stale request
+# can't fire much later.
+BLANK_REQ_PATH = os.path.join(RUNTIME_DIR, "phonescreen_blankreq")
+BLANK_REQ_TTL = 8.0
+
+
+def request_blank():
+    touch(BLANK_REQ_PATH)
+
+
+def take_blank_request():
+    fresh = _fresh(BLANK_REQ_PATH, BLANK_REQ_TTL)
+    try:
+        os.remove(BLANK_REQ_PATH)
+    except OSError:
+        pass
+    return fresh
+
+
 # --------------------------------------------------------------------------- #
 # serial / reachability / lock
 # --------------------------------------------------------------------------- #
@@ -577,9 +598,10 @@ class PinnedMirror:
             prev_min = self.applied[6] if self.applied else True
             self.applied = desired
             apply_window(x, y, w, h, above=above, borderless=borderless, minimized=want_min)
-            # mirror just became visible (un-minimized) -> blank the phone's physical
-            # screen via scrcpy's MOD+O, when enabled (default on)
-            if prev_min and not want_min and screen_off_enabled(self.serial):
+            # mirror just became visible AND a widget unlock asked for it -> blank the
+            # phone's physical screen via scrcpy's MOD+O (when enabled). take_blank_request
+            # is consumed on every un-minimize so a manual hand-unlock never blanks.
+            if prev_min and not want_min and take_blank_request() and screen_off_enabled(self.serial):
                 threading.Thread(target=self._screen_off_soon, daemon=True).start()
 
     def _screen_off_soon(self):
