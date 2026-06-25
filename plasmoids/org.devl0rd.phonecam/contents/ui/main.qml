@@ -33,9 +33,23 @@ PlasmoidItem {
     // own Screen.height is 0 until it's placed, which mis-sized everything.
     readonly property int screenH: Screen.height > 0 ? Screen.height : 1080
 
-    // Phone-area height (px). Seeded from config; the drag handle writes it live and
-    // commits it back to config on release so the size is remembered.
+    // Phone-area height (px), drag-resizable. REMEMBERED PER RESOLUTION: rotating or
+    // unfolding the phone changes its resolution, and each size wants its own height —
+    // so the saved height is keyed on the current mirror resolution ("WxH"). Falls back
+    // to the global phoneHeight default for a resolution that hasn't been sized yet.
+    readonly property string resKey: (mirror.phoneW > 0 && mirror.phoneH > 0)
+        ? (mirror.phoneW + "x" + mirror.phoneH) : ""
     property int phoneH: Plasmoid.configuration.phoneHeight
+    function _heightForRes(key) {
+        if (key) {
+            try {
+                var m = JSON.parse(Plasmoid.configuration.phoneHeights || "{}")
+                if (m[key] > 0) return m[key]
+            } catch (e) {}
+        }
+        return Plasmoid.configuration.phoneHeight
+    }
+    onResKeyChanged: phoneH = _heightForRes(resKey)
 
     // Phone aspect (w/h), CACHED in config so the popup is the right size the moment
     // it opens. Updated whenever the daemon reports a real phone size.
@@ -594,7 +608,13 @@ PlasmoidItem {
                     root.phoneH = Math.max(240, Math.min(2000, startH + dy))
                 }
                 onReleased: {
+                    // persist this height for the CURRENT resolution, and keep it as the
+                    // global default for resolutions not sized yet
                     Plasmoid.configuration.phoneHeight = root.phoneH
+                    var m = {}
+                    try { m = JSON.parse(Plasmoid.configuration.phoneHeights || "{}") } catch (e) {}
+                    if (root.resKey) m[root.resKey] = root.phoneH
+                    Plasmoid.configuration.phoneHeights = JSON.stringify(m)
                     root.resizing = false
                     root.claimMirror()                    // back on-screen at the new size
                 }

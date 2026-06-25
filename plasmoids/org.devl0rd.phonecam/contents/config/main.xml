@@ -19,9 +19,15 @@
         <entry name="cachedAspect" type="Double">
             <default>0.5625</default>
         </entry>
-        <!-- phone-area height in px; user-resizable by dragging the popup's bottom -->
+        <!-- phone-area height in px; user-resizable by dragging the popup's bottom.
+             default + fallback for resolutions not sized yet -->
         <entry name="phoneHeight" type="Int">
             <default>720</default>
+        </entry>
+        <!-- per-resolution heights: JSON map "WxH" -> px, so a rotated/unfolded phone
+             (new resolution) remembers its own drag-set height -->
+        <entry name="phoneHeights" type="String">
+            <default>{}</default>
         </entry>
     </group>
 </kcfg>
