@@ -626,7 +626,11 @@ class PinnedMirror:
         # --no-unlock: the pinned mirror just CONNECTS; it never wakes/PIN-unlocks the
         # phone (so a hidden reconnect on plug/unplug stays locked). The widgets unlock
         # explicitly only when they actually show the phone.
-        flags = ["--no-unlock", "--window-title", TITLE_TOKEN, "--no-audio",
+        # --no-power-on: connecting must NOT light up the phone's physical screen. Without
+        # it, scrcpy's default powers the panel on at every (re)connect — so a USB plug-in
+        # left the locked phone sitting lit on the lock screen. "Show" still wakes the panel
+        # itself (phonescreenctl unlock sends KEYCODE_WAKEUP), so this only stops idle wakes.
+        flags = ["--no-unlock", "--no-power-on", "--window-title", TITLE_TOKEN, "--no-audio",
                  "--no-window-aspect-ratio-lock"]
         if borderless:
             flags.append("--window-borderless")
