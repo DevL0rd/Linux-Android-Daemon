@@ -141,19 +141,26 @@ def resolve_target(serial, cfg, usb_map=None):
 
 def pick_active_serial(settings, cfg, usb_map=None):
     """Which phone the webcam should use. An explicit, known selection wins;
-    otherwise auto-pick a plugged-in phone, then any phone with a saved IP."""
+    otherwise auto-pick a plugged-in phone, then any phone with a saved IP.
+    Devices marked "enabled": false in config are skipped entirely, even if
+    plugged in or explicitly selected, so the webcam never grabs them."""
     if usb_map is None:
         usb_map = usb_serials()
     devices = cfg.get("devices", {})
+
+    def enabled(s):
+        return devices.get(s, {}).get("enabled", True)
+
     sel = settings.get("active_serial", "")
-    if sel and sel in devices:
+    if sel and sel in devices and enabled(sel):
         return sel
     for s in usb_map:
-        return s
-    for s, d in devices.items():
-        if d.get("last_ip"):
+        if enabled(s):
             return s
-    return next(iter(devices), "")
+    for s, d in devices.items():
+        if d.get("last_ip") and enabled(s):
+            return s
+    return next((s for s in devices if enabled(s)), "")
 
 
 # --- v4l2loopback -----------------------------------------------------------
