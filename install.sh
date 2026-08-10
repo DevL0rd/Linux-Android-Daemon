@@ -2,10 +2,27 @@
 set -e
 
 REPO_DIR=$(pwd)
+PLASMA_SERVICE="plasma-plasmashell.service"
+PLASMA_OVERRIDE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$PLASMA_SERVICE.d"
+PLASMA_OVERRIDE="$PLASMA_OVERRIDE_DIR/linux-android-daemon.conf"
 if [ ! -f "$REPO_DIR/src/daemon.py" ]; then
     echo "Please run this script from the repository directory."
     exit 1
 fi
+
+configure_plasma_local_file_access() {
+    if [ -L "$PLASMA_OVERRIDE" ]; then
+        echo "Error: refusing to overwrite symbolic link $PLASMA_OVERRIDE" >&2
+        exit 1
+    fi
+    mkdir -p "$PLASMA_OVERRIDE_DIR" "$HOME/.config/environment.d"
+    printf '[Service]\nEnvironment=QML_XHR_ALLOW_FILE_READ=1\n' > "$PLASMA_OVERRIDE"
+    chmod 0644 "$PLASMA_OVERRIDE"
+    printf 'QML_XHR_ALLOW_FILE_READ=1\n' > "$HOME/.config/environment.d/linux-android-daemon.conf"
+    systemctl --user set-environment QML_XHR_ALLOW_FILE_READ=1 2>/dev/null || true
+    systemctl --user daemon-reload
+    echo "Enabled local file access for managed Plasma sessions."
+}
 
 # Install the tools the daemon shells out to (official repos: pacman).
 #   adb  -> android-tools     scrcpy -> scrcpy     preview/feed -> ffmpeg
@@ -99,9 +116,7 @@ ln -sf "$REPO_DIR/bin/phonescreenctl" "$BIN_DIR/phonescreenctl"
 echo "Linked phonecamctl + phonescreenctl into $BIN_DIR"
 
 # 4. let the applet read the tmpfs status snapshot in-process via QML XHR
-mkdir -p "$HOME/.config/environment.d"
-echo 'QML_XHR_ALLOW_FILE_READ=1' > "$HOME/.config/environment.d/linux-android-daemon.conf"
-systemctl --user set-environment QML_XHR_ALLOW_FILE_READ=1 2>/dev/null || true
+configure_plasma_local_file_access
 
 # 5. the on-demand camera daemon (separate service; does NOT auto-launch on plug-in)
 cat <<EOF > ~/.config/systemd/user/linux-phonecam.service
@@ -225,13 +240,9 @@ echo "  Logs: journalctl --user -u linux-android-daemon.service -u linux-phoneca
 # reload Plasma so the new applet shows up (unless --no-reload)
 if ! printf '%s\n' "$@" | grep -qx -- --no-reload; then
     echo "Reloading Plasma…"
-    # plasmashell may be run by plasma-plasmashell.service OR as an app-plasmashell@<hash>
-    # scope (then plasma-plasmashell.service is inactive and "restarting" it just spawns a
-    # doomed duplicate). Restart the unit only when it actually runs the shell; otherwise
-    # quit + relaunch the running instance directly.
-    if systemctl --user --quiet is-active plasma-plasmashell.service; then
-        systemctl --user restart plasma-plasmashell.service
+    if systemctl --user --quiet is-active "$PLASMA_SERVICE"; then
+        systemctl --user restart "$PLASMA_SERVICE"
     else
-        kquitapp6 plasmashell 2>/dev/null; (kstart plasmashell >/dev/null 2>&1 &)
+        echo "  ! Plasma was not restarted because $PLASMA_SERVICE is inactive; log out and back in to apply the setting."
     fi
 fi
