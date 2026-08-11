@@ -237,12 +237,5 @@ echo "                  it; it stays connected and auto-picks USB/Wi-Fi."
 echo "  Edit config.json to tweak per-phone behavior; camera settings live under \"camera\"."
 echo "  Logs: journalctl --user -u linux-android-daemon.service -u linux-phonecam.service -f"
 
-# reload Plasma so the new applet shows up (unless --no-reload)
-if ! printf '%s\n' "$@" | grep -qx -- --no-reload; then
-    echo "Reloading Plasma…"
-    if systemctl --user --quiet is-active "$PLASMA_SERVICE"; then
-        systemctl --user restart "$PLASMA_SERVICE"
-    else
-        echo "  ! Plasma was not restarted because $PLASMA_SERVICE is inactive; log out and back in to apply the setting."
-    fi
-fi
+echo "Restarting Plasma…"
+systemctl --user restart "$PLASMA_SERVICE"
