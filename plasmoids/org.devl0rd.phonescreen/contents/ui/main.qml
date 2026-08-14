@@ -30,9 +30,6 @@ PlasmoidItem {
     readonly property color accent: Plasmoid.configuration.accentColor !== ""
         ? Plasmoid.configuration.accentColor : Kirigami.Theme.highlightColor
     readonly property string serial: (Plasmoid.configuration.deviceSerial || "").trim()
-    // "hide" keeps scrcpy running + connected but forces the window hidden (private)
-    readonly property bool forceHide: Plasmoid.configuration.hide
-    onForceHideChanged: claimMirror()
     // does THIS widget currently hold the mirror, or has the popup taken it?
     readonly property bool mirrorMine: feed.owner === "" || feed.owner === "desktop"
 
@@ -84,7 +81,6 @@ PlasmoidItem {
         if (root.serial !== "") a += " " + root.serial
         a += " --above " + (Plasmoid.configuration.keepBelow ? 0 : 1)
         a += " --borderless " + (Plasmoid.configuration.borderless ? 1 : 0)
-        a += " --min " + (root.forceHide ? 1 : 0)
         var extra = (Plasmoid.configuration.extraArgs || "").replace(/'/g, "").trim()
         if (extra !== "") a += " --extra '" + extra + "'"
         ctl(a)
@@ -185,17 +181,6 @@ PlasmoidItem {
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.delay: 600
                 }
-                // hide: keep scrcpy running + connected, but force the window hidden
-                PlasmaComponents.ToolButton {
-                    icon.name: root.forceHide ? "view-hidden" : "view-visible"
-                    display: QQC2.AbstractButton.IconOnly
-                    checkable: true
-                    checked: root.forceHide
-                    onToggled: Plasmoid.configuration.hide = checked
-                    QQC2.ToolTip.text: root.forceHide ? i18n("Show") : i18n("Hide")
-                    QQC2.ToolTip.visible: hovered
-                    QQC2.ToolTip.delay: 600
-                }
             }
 
             // ---------------- screen area (scrcpy pins over this) ----------------
@@ -236,7 +221,6 @@ PlasmoidItem {
                         visible: !(root.mirrorMine && feed.status === "connecting")
                         source: !feed.ready ? "dialog-error"
                               : !root.mirrorMine ? "window-duplicate"
-                              : root.forceHide ? "view-hidden"
                               : feed.status === "external" ? "window"
                               : feed.status === "fullscreen" ? "view-fullscreen"
                               : feed.status === "offline" ? "network-disconnect"
@@ -255,7 +239,6 @@ PlasmoidItem {
                         color: Kirigami.Theme.textColor; opacity: 0.8; font: Kirigami.Theme.smallFont
                         text: !feed.ready ? i18n("No daemon")
                             : !root.mirrorMine ? i18n("In dropdown")
-                            : root.forceHide ? i18n("Hidden")
                             : feed.status === "external" ? i18n("In another window")
                             : feed.status === "fullscreen" ? i18n("Fullscreen")
                             : feed.status === "offline" ? i18n("Offline")

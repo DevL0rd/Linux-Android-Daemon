@@ -171,7 +171,10 @@ def main():
     # this for the pinned mirror so a hidden (re)connect on plug/unplug never unlocks;
     # the widgets unlock explicitly only when they actually show the phone.
     no_unlock = "--no-unlock" in args
-    args = [a for a in args if a not in ("--display", "--no-unlock")]
+    # The pinned mirror stays alive even while hidden, so its rotation lock is managed
+    # by the widget unlock/phone lock lifecycle instead of the scrcpy process lifetime.
+    no_rotation_lock = "--no-rotation-lock" in args
+    args = [a for a in args if a not in ("--display", "--no-unlock", "--no-rotation-lock")]
     if not args:
         print("usage: scrcpy_launch.py <adb-target>|--auto [serial] [--display] [extra scrcpy args...]")
         return 1
@@ -241,7 +244,7 @@ def main():
         launcher_app = str(cfg.get("display_launcher", "") or "")
         if launcher_app:
             scrcpy_args.append(f"--start-app={launcher_app}")
-    else:
+    elif not no_rotation_lock:
         # Clone mode: lock the phone's auto-rotate so physically rotating it
         # doesn't make apps rotate in the mirror. Restored when scrcpy exits.
         orientation = str(cfg.get("orientation", "portrait") or "portrait").lower()

@@ -121,8 +121,7 @@ def cmd_lock(args):
         print("no phone to lock", file=sys.stderr)
         return 1
     ps.mark_lock_pending()            # daemon poll: trust this, don't fight it
-    sl.adb(target, "shell", "input", "keyevent", "223")   # KEYCODE_SLEEP -> lock FIRST
-    ps.set_locked(True)               # ...THEN hide
+    ps.lock_phone(target)             # sleep, restore rotation, then mark hidden
     ps.set_minimized(True)            # instant minimize (daemon rule confirms)
     return 0
 
@@ -132,20 +131,9 @@ def cmd_unlock(args):
     if not target:
         print("no phone to unlock", file=sys.stderr)
         return 1
-    ps.mark_lock_pending()            # daemon poll: trust this, don't fight it
-    ps.set_locked(False)              # show FIRST...
+    ps.unlock_phone(serial, target)    # show + PIN-unlock + apply managed rotation
     ps.request_blank()                # WE unlocked -> blank the panel once it shows
     ps.set_minimized(False)           # instant un-minimize (daemon rule confirms)
-    cfg = sl.load_config()
-    dev = dict(cfg.get("defaults", {}))
-    dev.update(cfg.get("devices", {}).get(sl.get_serial(target), {}))
-    pin = str(dev.get("lock_pin", "") or "")
-    sl.adb(target, "shell", "input", "keyevent", "224")   # KEYCODE_WAKEUP
-    if sl.is_locked(target) and pin:
-        sl.adb(target, "shell", "input", "keyevent", "62")   # SPACE -> PIN pad
-        time.sleep(0.1)
-        sl.adb(target, "shell", "input", "text", pin)
-        sl.adb(target, "shell", "input", "keyevent", "66")   # ENTER
     # turn the phone panel back off immediately (the wake/PIN turned it on) so you
     # barely see it light up. This focuses the mirror window briefly; the popup's
     # Phone tab is kept-open so that no longer closes it.

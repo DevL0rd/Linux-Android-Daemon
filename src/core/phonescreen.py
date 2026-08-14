@@ -180,6 +180,75 @@ def lock_pending():
     return _fresh(LOCK_PENDING_PATH, LOCK_PENDING_TTL)
 
 
+# A persistent pinned scrcpy process is not itself permission to show the phone.
+# This marker exists only from a widget-requested unlock until the phone next locks.
+# Consequently, unlocking the handset by hand cannot reveal the desktop mirror.
+WIDGET_UNLOCKED_PATH = os.path.join(RUNTIME_DIR, "phonescreen_widget_unlocked")
+ROTATION_LOCKED_PATH = os.path.join(RUNTIME_DIR, "phonescreen_rotation_locked")
+
+
+def _write_serial_marker(path, serial):
+    _runtime()
+    try:
+        with open(path, "w") as f:
+            f.write(serial or "")
+    except OSError:
+        pass
+
+
+def _read_serial_marker(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _clear_marker(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def widget_unlocked(serial=""):
+    owner = _read_serial_marker(WIDGET_UNLOCKED_PATH)
+    return bool(owner) and (not serial or owner == serial)
+
+
+def _effective_device_config(serial):
+    cfg = cam.load_config()
+    out = dict(cfg.get("defaults", {}))
+    out.update(cfg.get("devices", {}).get(serial, {}))
+    return out
+
+
+def apply_widget_rotation_lock(serial, target):
+    """Apply rotation only for a widget-owned clone-screen session."""
+    cfg = _effective_device_config(serial)
+    mode = str(cfg.get("mode", "clone") or "clone").lower()
+    orientation = str(cfg.get("orientation", "portrait") or "portrait").lower()
+    if mode not in ("extended", "display", "dex") \
+            and sl.lock_rotation(target, orientation):
+        _write_serial_marker(ROTATION_LOCKED_PATH, serial)
+
+
+def release_widget_rotation_lock(target=""):
+    """Restore auto-rotation without sending a power/wake key event."""
+    serial = _read_serial_marker(ROTATION_LOCKED_PATH)
+    if not serial:
+        return
+    sl.restore_rotation(adb_target(serial) or target)
+    _clear_marker(ROTATION_LOCKED_PATH)
+
+
+def phone_locked(target=""):
+    """Central state transition for every observed or requested phone lock."""
+    release_widget_rotation_lock(target)
+    _clear_marker(WIDGET_UNLOCKED_PATH)
+    set_locked(True)
+
+
 # A widget-initiated unlock requests a one-shot screen-off once the mirror shows, so we
 # blank the panel ONLY when WE unlocked — a manual hand-unlock (seen only by the lock
 # poll) must not blank it. Consumed on the next un-minimize; TTL'd so a stale request
@@ -310,6 +379,23 @@ def lock_phone(target):
         sl.adb(target, "shell", "input", "keyevent", "223")   # KEYCODE_SLEEP
     except Exception:
         pass
+    phone_locked(target)
+
+
+def unlock_phone(serial, target):
+    """Wake/reveal a phone for our widget and begin the managed rotation session."""
+    mark_lock_pending()
+    _write_serial_marker(WIDGET_UNLOCKED_PATH, serial)
+    set_locked(False)
+    cfg = _effective_device_config(serial)
+    pin = str(cfg.get("lock_pin", "") or "")
+    sl.adb(target, "shell", "input", "keyevent", "224")   # KEYCODE_WAKEUP
+    if sl.is_locked(target) and pin:
+        sl.adb(target, "shell", "input", "keyevent", "62")   # SPACE -> PIN pad
+        time.sleep(0.1)
+        sl.adb(target, "shell", "input", "text", pin)
+        sl.adb(target, "shell", "input", "keyevent", "66")   # ENTER
+    apply_widget_rotation_lock(serial, target)
 
 
 def screen_off_enabled(serial):
@@ -590,9 +676,12 @@ class PinnedMirror:
             above = bool(win.get("above", False))
             borderless = bool(win.get("borderless", True))
             self.last_geom = (x, y, w, h, above, borderless)
-            # hide via the KWin minimize rule (locked marker, or the claim asking on
-            # another tab / while resizing) — no grace, no cooldown.
-            want_min = bool(win.get("min", False)) or get_locked()
+            # Hide unless our widget explicitly owns the current unlock. A handset
+            # unlock alone must not reveal it; claim-level minimization still handles
+            # another tab / live resize — no grace, no cooldown.
+            serial = win.get("serial") or resolve_serial()
+            want_min = bool(win.get("min", False)) or get_locked() \
+                or not widget_unlocked(serial)
         desired = (x, y, w, h, above, borderless, want_min)
         if desired != self.applied:
             prev_min = self.applied[6] if self.applied else True
@@ -630,8 +719,8 @@ class PinnedMirror:
         # it, scrcpy's default powers the panel on at every (re)connect — so a USB plug-in
         # left the locked phone sitting lit on the lock screen. "Show" still wakes the panel
         # itself (phonescreenctl unlock sends KEYCODE_WAKEUP), so this only stops idle wakes.
-        flags = ["--no-unlock", "--no-power-on", "--window-title", TITLE_TOKEN, "--no-audio",
-                 "--no-window-aspect-ratio-lock"]
+        flags = ["--no-unlock", "--no-rotation-lock", "--no-power-on",
+                 "--window-title", TITLE_TOKEN, "--no-audio", "--no-window-aspect-ratio-lock"]
         if borderless:
             flags.append("--window-borderless")
         flags += extra
@@ -685,15 +774,22 @@ class PinnedMirror:
         write_status(width=w, height=h, link=self.link, **kw)
 
     def poll_lock(self):
-        """Fast physical lock/unlock detection so a SHOWN mirror hides/shows quickly.
-        Runs only while the mirror is actually visible — minimized (no claim) means
-        we already locked it, and a popped-out/paused mirror isn't ours to touch."""
+        """Hide on every real lock, but reveal only after a widget-owned unlock."""
         if lock_pending():                       # a just-pressed button owns the state
             return
         win = pick_winner(read_claims())
-        if not win or bool(win.get("min", False)) or not self._alive():
+        managed = widget_unlocked(self.serial)
+        if (not win or bool(win.get("min", False)) or not self._alive()) and not managed:
             return
-        set_locked(is_locked(self.target or adb_target(self.serial)))
+        target = self.target or adb_target(self.serial)
+        if is_locked(target):
+            phone_locked(target)
+        elif managed:
+            set_locked(False)
+        else:
+            # The handset was unlocked by hand. Keep the always-running mirror hidden
+            # until one of our widgets explicitly requests access.
+            set_locked(True)
 
     def tick(self):
         win = pick_winner(read_claims())
@@ -717,7 +813,6 @@ class PinnedMirror:
                 return
             if not self.no_claim_since:               # the last claim just dropped
                 self.no_claim_since = time.time()
-                set_locked(True)                      # lock + (reconcile) minimize
                 lock_phone(self.target or adb_target(self.serial))
             serial = self.serial or resolve_serial()
             self.serial = serial
@@ -770,7 +865,12 @@ class PinnedMirror:
                 return
             self.next_launch = now + 2.0
             self.target = adb_target(serial)
-            set_locked(is_locked(self.target))
+            if is_locked(self.target):
+                phone_locked(self.target)
+            elif widget_unlocked(serial):
+                set_locked(False)
+            else:
+                set_locked(True)  # a manual handset unlock never reveals the mirror
             self.proc = self._launch(serial, borderless, extra)
             self.started = now
             self.connected = False
