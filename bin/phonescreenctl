@@ -121,7 +121,7 @@ def cmd_lock(args):
         print("no phone to lock", file=sys.stderr)
         return 1
     ps.mark_lock_pending()            # daemon poll: trust this, don't fight it
-    ps.lock_phone(target)             # sleep, restore rotation, then mark hidden
+    ps.lock_phone(target)
     ps.set_minimized(True)            # instant minimize (daemon rule confirms)
     return 0
 
@@ -131,13 +131,12 @@ def cmd_unlock(args):
     if not target:
         print("no phone to unlock", file=sys.stderr)
         return 1
-    ps.unlock_phone(serial, target)    # show + PIN-unlock + apply managed rotation
-    ps.request_blank()                # WE unlocked -> blank the panel once it shows
+    ps.unlock_phone(serial, target)
     ps.set_minimized(False)           # instant un-minimize (daemon rule confirms)
     # turn the phone panel back off immediately (the wake/PIN turned it on) so you
     # barely see it light up. This focuses the mirror window briefly; the popup's
     # Phone tab is kept-open so that no longer closes it.
-    if ps.screen_off_configured(sl.get_serial(target)):
+    if ps.screen_off_enabled(sl.get_serial(target)):
         ps.screen_off_via_scrcpy()
     return 0
 

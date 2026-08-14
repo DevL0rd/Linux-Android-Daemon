@@ -171,8 +171,6 @@ def main():
     # this for the pinned mirror so a hidden (re)connect on plug/unplug never unlocks;
     # the widgets unlock explicitly only when they actually show the phone.
     no_unlock = "--no-unlock" in args
-    # The pinned mirror stays alive even while hidden, so its rotation lock is managed
-    # by the widget unlock/phone lock lifecycle instead of the scrcpy process lifetime.
     no_rotation_lock = "--no-rotation-lock" in args
     args = [a for a in args if a not in ("--display", "--no-unlock", "--no-rotation-lock")]
     if not args:

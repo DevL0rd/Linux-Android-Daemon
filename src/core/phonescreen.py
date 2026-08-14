@@ -180,9 +180,6 @@ def lock_pending():
     return _fresh(LOCK_PENDING_PATH, LOCK_PENDING_TTL)
 
 
-# A persistent pinned scrcpy process is not itself permission to show the phone.
-# This marker exists only from a widget-requested unlock until the phone next locks.
-# Consequently, unlocking the handset by hand cannot reveal the desktop mirror.
 WIDGET_UNLOCKED_PATH = os.path.join(RUNTIME_DIR, "phonescreen_widget_unlocked")
 ROTATION_LOCKED_PATH = os.path.join(RUNTIME_DIR, "phonescreen_rotation_locked")
 
@@ -224,7 +221,6 @@ def _effective_device_config(serial):
 
 
 def apply_widget_rotation_lock(serial, target):
-    """Apply rotation only for a widget-owned clone-screen session."""
     cfg = _effective_device_config(serial)
     mode = str(cfg.get("mode", "clone") or "clone").lower()
     orientation = str(cfg.get("orientation", "portrait") or "portrait").lower()
@@ -234,7 +230,6 @@ def apply_widget_rotation_lock(serial, target):
 
 
 def release_widget_rotation_lock(target=""):
-    """Restore auto-rotation without sending a power/wake key event."""
     serial = _read_serial_marker(ROTATION_LOCKED_PATH)
     if not serial:
         return
@@ -243,7 +238,6 @@ def release_widget_rotation_lock(target=""):
 
 
 def phone_locked(target=""):
-    """Central state transition for every observed or requested phone lock."""
     release_widget_rotation_lock(target)
     _clear_marker(WIDGET_UNLOCKED_PATH)
     set_locked(True)
@@ -383,18 +377,18 @@ def lock_phone(target):
 
 
 def unlock_phone(serial, target):
-    """Wake/reveal a phone for our widget and begin the managed rotation session."""
+    request_blank()
     mark_lock_pending()
     _write_serial_marker(WIDGET_UNLOCKED_PATH, serial)
     set_locked(False)
     cfg = _effective_device_config(serial)
     pin = str(cfg.get("lock_pin", "") or "")
-    sl.adb(target, "shell", "input", "keyevent", "224")   # KEYCODE_WAKEUP
+    sl.adb(target, "shell", "input", "keyevent", "224")
     if sl.is_locked(target) and pin:
-        sl.adb(target, "shell", "input", "keyevent", "62")   # SPACE -> PIN pad
+        sl.adb(target, "shell", "input", "keyevent", "62")
         time.sleep(0.1)
         sl.adb(target, "shell", "input", "text", pin)
-        sl.adb(target, "shell", "input", "keyevent", "66")   # ENTER
+        sl.adb(target, "shell", "input", "keyevent", "66")
     apply_widget_rotation_lock(serial, target)
 
 
@@ -676,9 +670,6 @@ class PinnedMirror:
             above = bool(win.get("above", False))
             borderless = bool(win.get("borderless", True))
             self.last_geom = (x, y, w, h, above, borderless)
-            # Hide unless our widget explicitly owns the current unlock. A handset
-            # unlock alone must not reveal it; claim-level minimization still handles
-            # another tab / live resize — no grace, no cooldown.
             serial = win.get("serial") or resolve_serial()
             want_min = bool(win.get("min", False)) or get_locked() \
                 or not widget_unlocked(serial)
@@ -774,7 +765,6 @@ class PinnedMirror:
         write_status(width=w, height=h, link=self.link, **kw)
 
     def poll_lock(self):
-        """Hide on every real lock, but reveal only after a widget-owned unlock."""
         if lock_pending():                       # a just-pressed button owns the state
             return
         win = pick_winner(read_claims())
@@ -787,8 +777,6 @@ class PinnedMirror:
         elif managed:
             set_locked(False)
         else:
-            # The handset was unlocked by hand. Keep the always-running mirror hidden
-            # until one of our widgets explicitly requests access.
             set_locked(True)
 
     def tick(self):
@@ -870,7 +858,7 @@ class PinnedMirror:
             elif widget_unlocked(serial):
                 set_locked(False)
             else:
-                set_locked(True)  # a manual handset unlock never reveals the mirror
+                set_locked(True)
             self.proc = self._launch(serial, borderless, extra)
             self.started = now
             self.connected = False
